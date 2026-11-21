@@ -5,7 +5,12 @@
 //!
 //! Without the variables every test returns at once, so `cargo test` stays offline.
 
-use hem_sdk::{jwt_parse, AuthOptions, Hem, HemOptions};
+use hem_sdk::{
+    jwt_parse, AuthOptions, CreateOptions, Hem, HemOptions, SearchOptions, SignOptions, VerifyOptions,
+};
+
+/// Description of the one test key; found again on every run, created only once.
+const TEST_DESCR: &[u8] = b"hem-sdk-rust-test";
 
 fn device() -> Option<Hem> {
     let url = std::env::var("HEM_URL").ok()?;
@@ -31,4 +36,50 @@ async fn password_token() {
     // The second call for the same scope comes from the cache: same token.
     let t2 = hem.authorize_password(None, "keymgmt:list", AuthOptions::default()).await.unwrap();
     assert_eq!(t, t2);
+}
+
+#[tokio::test]
+async fn ed25519_sign_and_verify() {
+    let Some(hem) = device() else { return };
+    let Ok(password) = std::env::var("HEM_PASSWORD") else { return };
+
+    // Find the test key by its description, create it on the first run only.
+    let tok = hem
+        .authorize_password(Some(&password), ["keymgmt:search", "keymgmt:gen"], AuthOptions::default())
+        .await
+        .unwrap();
+    let search = SearchOptions { key_type: Some("ED25519".into()), ..Default::default() };
+    let found = hem.search_keys_all(Some(&tok), TEST_DESCR, search).await.unwrap();
+    let key = match found.into_iter().next() {
+        Some(k) => k,
+        None => {
+            let opts = CreateOptions { descr: Some(TEST_DESCR.to_vec()), ..Default::default() };
+            hem.create_key_pair(&tok, "hem-sdk-rust live test", "ED25519", opts).await.unwrap()
+        }
+    };
+    assert_eq!(key.key_type, "ED25519");
+
+    let use_tok = hem
+        .authorize_password(None, format!("keymgmt:use:{}", key.kid), AuthOptions::default())
+        .await
+        .unwrap();
+    let info = hem.get_key_public_info(&use_tok, &key.kid).await.unwrap();
+    assert_eq!(info.key_type, "ED25519");
+    assert_eq!(info.description.as_deref(), Some(TEST_DESCR));
+    let pubkey: [u8; 32] = info.pubkey.expect("public key").try_into().expect("32 bytes");
+
+    let msg = [0x5au8; 100];
+    let sig = hem.exdsa_sign(&use_tok, &key.kid, &msg, SignOptions::default()).await.unwrap();
+    assert_eq!(sig.len(), 64);
+
+    // The device agrees, and refuses a corrupted signature.
+    assert!(hem.exdsa_verify(&use_tok, &key.kid, &msg, &sig, VerifyOptions::default()).await.unwrap());
+    let mut bad = sig.clone();
+    bad[0] ^= 1;
+    assert!(!hem.exdsa_verify(&use_tok, &key.kid, &msg, &bad, VerifyOptions::default()).await.unwrap());
+
+    // Independent check, as an SSH server would do it.
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&pubkey).unwrap();
+    let s = ed25519_dalek::Signature::from_bytes(&sig.try_into().unwrap());
+    vk.verify_strict(&msg, &s).expect("signature verifies with ed25519-dalek");
 }

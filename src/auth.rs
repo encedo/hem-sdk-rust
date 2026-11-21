@@ -21,14 +21,12 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 use crate::error::{HemError, Result};
+use crate::limits::TOKEN_CTX;
 
 pub(crate) const PBKDF2_ITERATIONS: u32 = 600_000;
 
 /// The eJWT header, byte for byte what hem-sdk-js sends.
 const EJWT_HEADER: &[u8] = br#"{"ecdh":"x25519","alg":"HS256","typ":"JWT"}"#;
-
-/// Max `ctx` in a token request, bytes of UTF-8 (API reference, auth/token).
-pub(crate) const TOKEN_CTX_MAX: usize = 64;
 
 const B64_ANY_PAD: GeneralPurpose = GeneralPurpose::new(
     &alphabet::STANDARD,
@@ -99,8 +97,8 @@ impl<const N: usize> From<[&str; N]> for Scope {
 
 pub(crate) fn check_token_ctx(ctx: Option<&str>) -> Result<()> {
     match ctx {
-        Some(c) if c.is_empty() || c.len() > TOKEN_CTX_MAX => Err(HemError::invalid_arg(format!(
-            "ctx is 1..{TOKEN_CTX_MAX} bytes of UTF-8"
+        Some(c) if c.is_empty() || c.len() > TOKEN_CTX => Err(HemError::invalid_arg(format!(
+            "ctx is 1..{TOKEN_CTX} bytes of UTF-8"
         ))),
         _ => Ok(()),
     }

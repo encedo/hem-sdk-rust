@@ -65,6 +65,9 @@ src/error.rs    HemError
 src/http.rs     the single HTTP entry point (device and broker)
 src/auth.rs     password -> X25519, eJWT, scope checks, token cache (no I/O)
 src/hem.rs      Hem: system + authorisation methods
+src/keys.rs     impl Hem: key management (create, get, list, search), KeyEntry, KeyPage
+src/crypto.rs   impl Hem: cryptography (exdsa sign / verify, ...)
+src/limits.rs   device limits, each with its API reference section
 src/broker.rs   Broker: api.encedo.com
 tests/vectors/  gen.mjs + recorded vectors (from hem-sdk-js)
 tests/*.rs      vector tests (offline), live tests (HEM_URL)
@@ -81,9 +84,12 @@ tests/*.rs      vector tests (offline), live tests (HEM_URL)
 
 ## Roadmap
 
-- v0.1 (for hem-ssh-agent): `get_version`, `get_status`, `hem_checkin`,
-  `authorize_password`, `search_keys` / `list_keys`, `get_pub_key`,
-  `exdsa_sign`, `exdsa_verify`, then `authorize_remote` (broker + phone).
+- v0.1 (for hem-ssh-agent): done - `get_version`, `get_status`,
+  `hem_checkin`, `authorize_password`, `create_key_pair`,
+  `get_key_public_info`, `list_keys(_all)`, `search_keys(_all)`,
+  `exdsa_sign`, `exdsa_verify`. Next: `authorize_remote` (broker + phone).
+- Methods are grouped in `impl Hem` blocks per file, as hem-sdk-js groups
+  them; the `*_all` walks return a `Vec` (hem-sdk-js: async generators).
 - Later: `authorize_master` (BIP39), key management, ECDH, cipher, HPKE, PQC,
   storage, logs, attestation, firmware upload - in the order consumers need.
 

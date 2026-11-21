@@ -17,14 +17,19 @@
 
 mod auth;
 mod broker;
+mod crypto;
 mod error;
 mod hem;
 mod http;
+mod keys;
+mod limits;
 
 pub use auth::{jwt_parse, Scope};
 pub use broker::{Broker, DEFAULT_BROKER_URL};
+pub use crypto::{SignOptions, VerifyOptions};
 pub use error::{HemError, Result};
 pub use hem::{AuthOptions, Hem, HemOptions};
+pub use keys::{CreateOptions, KeyEntry, KeyPage, ListOptions, Match, SearchOptions};
 
 /// Internals exposed for the cross-language vector tests only. Not a public API.
 #[doc(hidden)]

@@ -72,7 +72,7 @@ impl Hem {
         &self.broker
     }
 
-    async fn req(&self, method: Method, path: &str, body: Option<&Value>, token: Option<&str>) -> Result<Value> {
+    pub(crate) async fn req(&self, method: Method, path: &str, body: Option<&Value>, token: Option<&str>) -> Result<Value> {
         self.http.request(method, &format!("{}{path}", self.base_url), body, token).await
     }
 

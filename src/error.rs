@@ -8,7 +8,8 @@ use serde_json::Value;
 /// `code` is the machine-readable part and matches hem-sdk-js:
 /// `http_<status>` for a non-2xx answer (with `status` and the parsed body in
 /// `data`), `timeout`, `network`, `invalid_arg` (caught before any request),
-/// `auth_failed`, `auth_password_required`, `checkin_error`, `broker_error`,
+/// `bad_mode` (a key mode that does not fit the type), `auth_failed`,
+/// `auth_password_required`, `checkin_error`, `broker_error`, `sign_error`,
 /// `bad_response`.
 ///
 /// There is no `aborted`: in Rust a request is cancelled by dropping its future.
