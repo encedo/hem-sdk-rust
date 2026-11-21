@@ -87,7 +87,11 @@ tests/*.rs      vector tests (offline), live tests (HEM_URL)
 - v0.1 (for hem-ssh-agent): done - `get_version`, `get_status`,
   `hem_checkin`, `authorize_password`, `create_key_pair`,
   `get_key_public_info`, `list_keys(_all)`, `search_keys(_all)`,
-  `exdsa_sign`, `exdsa_verify`. Next: `authorize_remote` (broker + phone).
+  `exdsa_sign`, `exdsa_verify`, `authorize_remote` (broker + phone; live
+  test with a paired authenticator behind `HEM_REMOTE=1`) with the broker's
+  `session`, `event_new`, `event_check`, `event_delete`, `wait_event`.
+  A pending event is withdrawn on error, timeout or when the caller drops
+  the future (no `onPending` / `onEvent` callbacks yet).
 - Methods are grouped in `impl Hem` blocks per file, as hem-sdk-js groups
   them; the `*_all` walks return a `Vec` (hem-sdk-js: async generators).
 - Later: `authorize_master` (BIP39), key management, ECDH, cipher, HPKE, PQC,

@@ -9,5 +9,7 @@ pub(crate) const SIG_CTX: usize = 255;
 pub(crate) const PAGE_SIZE: u32 = 15;
 /// auth/token (auth claim), auth/ext/request: `ctx` 1..64 bytes of UTF-8.
 pub(crate) const TOKEN_CTX: usize = 64;
+/// auth/ext/request: `note` 1..128 bytes of UTF-8, shown with the request on the phone.
+pub(crate) const REMOTE_NOTE: usize = 128;
 /// Paging stops here even if a device keeps answering (hem-sdk-js `0xffff`).
 pub(crate) const MAX_OFFSET: u32 = 0xffff;

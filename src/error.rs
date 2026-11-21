@@ -10,7 +10,8 @@ use serde_json::Value;
 /// `data`), `timeout`, `network`, `invalid_arg` (caught before any request),
 /// `bad_mode` (a key mode that does not fit the type), `auth_failed`,
 /// `auth_password_required`, `checkin_error`, `broker_error`, `sign_error`,
-/// `bad_response`.
+/// `bad_response`, `denied` (refused on the phone), `scope_widened` (a remote
+/// token holding more than was asked).
 ///
 /// There is no `aborted`: in Rust a request is cancelled by dropping its future.
 #[derive(Debug, thiserror::Error)]

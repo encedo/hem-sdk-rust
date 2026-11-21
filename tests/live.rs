@@ -6,7 +6,8 @@
 //! Without the variables every test returns at once, so `cargo test` stays offline.
 
 use hem_sdk::{
-    jwt_parse, AuthOptions, CreateOptions, Hem, HemOptions, SearchOptions, SignOptions, VerifyOptions,
+    jwt_parse, AuthOptions, CreateOptions, Hem, HemOptions, RemoteOptions, SearchOptions, SignOptions, Uv,
+    VerifyOptions,
 };
 
 /// Description of the one test key; found again on every run, created only once.
@@ -36,6 +37,30 @@ async fn password_token() {
     // The second call for the same scope comes from the cache: same token.
     let t2 = hem.authorize_password(None, "keymgmt:list", AuthOptions::default()).await.unwrap();
     assert_eq!(t, t2);
+}
+
+/// Needs a paired encedo-authenticator and a person to approve on the phone:
+/// HEM_REMOTE=1 cargo test --test live remote -- --nocapture
+#[tokio::test]
+async fn remote_token() {
+    let Some(hem) = device() else { return };
+    if std::env::var("HEM_REMOTE").is_err() {
+        return;
+    }
+    hem.hem_checkin().await.unwrap();
+    let opts = RemoteOptions {
+        require: Some(Uv::Bio),
+        note: Some("hem-sdk-rust live test: approve".into()),
+        ..Default::default()
+    };
+    eprintln!("approve the request on the phone (60 s)");
+    let t = hem.authorize_remote("keymgmt:list", opts.clone()).await.unwrap();
+    let p = jwt_parse(&t).expect("token is a JWT");
+    assert_eq!(p["scope"], "keymgmt:list");
+    eprintln!("token payload: {p}");
+    // The token works, and the second call comes from the cache.
+    assert!(hem.list_keys(&t, Default::default()).await.is_ok());
+    assert_eq!(hem.authorize_remote("keymgmt:list", opts).await.unwrap(), t);
 }
 
 #[tokio::test]

@@ -40,6 +40,18 @@ impl Http {
         body: Option<&Value>,
         token: Option<&str>,
     ) -> Result<Value> {
+        self.request_status(method, url, body, token).await.map(|(_, data)| data)
+    }
+
+    /// As `request`, with the 2xx status too, so a poll can tell 202
+    /// "pending" from 200 "done" (hem-sdk-js `withStatus`).
+    pub(crate) async fn request_status(
+        &self,
+        method: Method,
+        url: &str,
+        body: Option<&Value>,
+        token: Option<&str>,
+    ) -> Result<(u16, Value)> {
         let mut req = self.client.request(method.clone(), url);
         if let Some(b) = body {
             // A byte body, not .json(): reqwest then always sets Content-Length.
@@ -81,6 +93,6 @@ impl Http {
                 format!("{} {method} {url} -> HTTP {status}", self.tag),
             ));
         }
-        Ok(data)
+        Ok((status, data))
     }
 }
