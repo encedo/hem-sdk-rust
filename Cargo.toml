@@ -1,0 +1,34 @@
+[package]
+name = "hem-sdk"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Rust client for the Encedo HEM (firmware 1.3 and later)"
+license = "MIT"
+repository = "https://github.com/encedo/hem-sdk-rust"
+publish = false
+
+[dependencies]
+tokio = { version = "1", features = ["rt", "time", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+sha2 = "0.10"
+hmac = "0.12"
+base64 = "0.22"
+thiserror = "2"
+zeroize = "1"
+# One TLS stack on every platform: rustls with the bundled Mozilla roots (as
+# encedo-authenticator). See docs/DESIGN.md.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-webpki-roots"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
+
+# PBKDF2 with 600 000 iterations is seconds per call unoptimised; tests run it many times.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
