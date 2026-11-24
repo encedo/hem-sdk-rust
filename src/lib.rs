@@ -34,7 +34,7 @@ pub use keys::{CreateOptions, KeyEntry, KeyPage, ListOptions, Match, SearchOptio
 /// Internals exposed for the cross-language vector tests only. Not a public API.
 #[doc(hidden)]
 pub mod __vectors {
-    use crate::auth::{build_ejwt, derive_x25519, Challenge, EjwtPayload, Scope};
+    use crate::auth::{derive_x25519, Challenge, Scope, SessionKey};
     use crate::error::Result;
 
     /// (iss, eJWT) for a password, a challenge, a scope and a fixed clock.
@@ -49,10 +49,12 @@ pub mod __vectors {
         ctx: Option<&str>,
         now: i64,
     ) -> Result<(String, String)> {
+        // DEV-532: through the remembered-password path - the recorded vectors
+        // prove the wire is unchanged.
         let keys = derive_x25519(password, eid);
         let ch = Challenge { eid: eid.into(), spk: spk.into(), jti: jti.into() };
-        let payload = EjwtPayload::new(&ch, &keys, scope, exp_seconds, ctx, now);
-        let ejwt = build_ejwt(&keys, spk, &payload)?;
-        Ok((keys.pubkey_b64.clone(), ejwt))
+        let session = SessionKey::new(&keys, &ch, None)?;
+        let ejwt = session.ejwt(&ch, scope, exp_seconds, ctx, now)?;
+        Ok((session.iss().to_owned(), ejwt))
     }
 }

@@ -1,16 +1,13 @@
 //! The device (hem-sdk-js `HEM`).
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use reqwest::Method;
 use serde_json::{json, Value};
 use zeroize::Zeroizing;
 
-use crate::auth::{
-    build_ejwt, check_token_ctx, derive_x25519, jwt_parse, now_unix, Challenge, DerivedKeys, EjwtPayload,
-    Scope, TokenCache,
-};
+use crate::auth::{check_token_ctx, derive_x25519, jwt_parse, now_unix, Challenge, Scope, SessionKey, TokenCache};
 use crate::broker::{Broker, DEFAULT_BROKER_URL};
 use crate::error::{HemError, Result};
 use crate::http::Http;
@@ -23,6 +20,13 @@ pub struct HemOptions {
     pub broker: Option<Broker>,
     /// Per-request timeout (`HemError` code `timeout`); `None` = no limit.
     pub timeout: Option<Duration>,
+    /// DEV-532: how long a remembered password lasts, from the password
+    /// entry; `None` = until the device's next boot or [`Hem::clear_keys`].
+    pub key_cache_ttl: Option<Duration>,
+    /// DEV-532: allow password login over plain `http://`. There `iss` and the
+    /// HMAC on the wire let an observer test password guesses offline, so it
+    /// is refused (`plain_http_login`) unless this is set.
+    pub allow_plain_http_login: bool,
 }
 
 /// Options for [`Hem::authorize_password`].
@@ -30,8 +34,10 @@ pub struct HemOptions {
 pub struct AuthOptions {
     /// Requested token lifetime; the device's own default without one is 60 s.
     pub exp_seconds: u32,
-    /// Keep the derived key for the scopes that follow (no password again).
-    /// Tokens are cached either way.
+    /// Remember the password for the scopes that follow (no password again):
+    /// as the per-boot secret `K_s`, until the device's next boot, the
+    /// `key_cache_ttl` or [`Hem::clear_keys`] (DEV-532). Tokens are cached
+    /// either way.
     pub remember: bool,
     /// 1..64 bytes of UTF-8, copied into the token.
     pub ctx: Option<String>,
@@ -49,7 +55,9 @@ pub struct Hem {
     http: Http,
     broker: Broker,
     tokens: Mutex<TokenCache>,
-    keys: Mutex<Option<Arc<DerivedKeys>>>,
+    keys: Mutex<Option<SessionKey>>, // DEV-532: K_s of this device boot, not the derived key
+    key_cache_ttl: Option<Duration>,
+    allow_plain_http_login: bool,
 }
 
 impl Hem {
@@ -65,6 +73,8 @@ impl Hem {
             broker,
             tokens: Mutex::new(TokenCache::default()),
             keys: Mutex::new(None),
+            key_cache_ttl: opts.key_cache_ttl,
+            allow_plain_http_login: opts.allow_plain_http_login,
         })
     }
 
@@ -79,7 +89,7 @@ impl Hem {
 
     // -- Caches ---------------------------------------------------------------
 
-    /// Drop the derived key and every cached token (logout).
+    /// Forget the remembered password and every cached token (logout).
     pub fn clear_keys(&self) {
         *self.keys.lock().unwrap() = None;
         self.tokens.lock().unwrap().clear();
@@ -126,9 +136,13 @@ impl Hem {
 
     /// Authenticate with the local password and get a scoped JWT.
     ///
-    /// `password` `None` reuses the key a previous call remembered
-    /// (`auth_password_required` if there is none). A token already cached for
-    /// the scope and `ctx` is returned without asking the device.
+    /// `password` `None` reuses the password a previous call remembered - as
+    /// the per-boot secret `K_s` (DEV-532): only for the same device boot
+    /// (`eid`, `spk`) and within `key_cache_ttl`, else it is forgotten and the
+    /// call fails with `auth_password_required`. A token already cached for
+    /// the scope and `ctx` is returned without asking the device. Over plain
+    /// `http://` a login fails with `plain_http_login` unless
+    /// `HemOptions::allow_plain_http_login`.
     pub async fn authorize_password(
         &self,
         password: Option<&str>,
@@ -141,46 +155,56 @@ impl Hem {
         if let Some(t) = self.tokens.lock().unwrap().find(&scope, opts.ctx.as_deref(), now_unix()) {
             return Ok(t);
         }
+        //DEV-532: iss and the HMAC on the wire let an observer test password guesses
+        if self.base_url.to_ascii_lowercase().starts_with("http://") && !self.allow_plain_http_login {
+            return Err(HemError::new(
+                "plain_http_login",
+                "Password login over plain http is refused (HemOptions::allow_plain_http_login)",
+            ));
+        }
 
         let challenge: Challenge = serde_json::from_value(self.req(Method::GET, "/api/auth/token", None, None).await?)
             .map_err(|_| HemError::new("bad_response", "auth challenge without eid / spk / jti"))?;
+        let now = now_unix();
+        let ctx = opts.ctx.as_deref();
 
-        let keys = match password {
+        //DEV-532: what is remembered is K_s of this boot, never the derived key
+        let (ejwt, fresh) = match password {
             Some(p) => {
                 let p = Zeroizing::new(p.to_owned());
                 let eid = challenge.eid.clone();
-                let k = Arc::new(
-                    tokio::task::spawn_blocking(move || derive_x25519(&p, &eid))
-                        .await
-                        .map_err(|e| HemError::new("auth_failed", format!("key derivation: {e}")))?,
-                );
-                if opts.remember {
-                    *self.keys.lock().unwrap() = Some(k.clone());
-                }
-                k
+                let keys = tokio::task::spawn_blocking(move || derive_x25519(&p, &eid))
+                    .await
+                    .map_err(|e| HemError::new("auth_failed", format!("key derivation: {e}")))?;
+                let session = SessionKey::new(&keys, &challenge, self.key_cache_ttl)?;
+                drop(keys); // user_sk zeroized here
+                (session.ejwt(&challenge, &scope, opts.exp_seconds, ctx, now)?, Some(session))
             }
-            None => self
-                .keys
-                .lock()
-                .unwrap()
-                .clone()
-                .ok_or_else(|| HemError::new("auth_password_required", "Password required (no cached keys)"))?,
+            None => {
+                let mut remembered = self.keys.lock().unwrap();
+                match remembered.as_ref() {
+                    Some(s) if s.fits(&challenge) => (s.ejwt(&challenge, &scope, opts.exp_seconds, ctx, now)?, None),
+                    _ => {
+                        *remembered = None; // another boot, another device, or the TTL is over
+                        return Err(HemError::new(
+                            "auth_password_required",
+                            "Password required (no remembered password for this device boot)",
+                        ));
+                    }
+                }
+            }
         };
 
-        self.authorize_with_keys(&keys, &challenge, &scope, opts.exp_seconds, opts.ctx.as_deref()).await
+        let token = self.exchange_ejwt(&ejwt, &scope, ctx).await?;
+        // Remembered only once the device took it: a wrong password is not kept.
+        if let (Some(session), true) = (fresh, opts.remember) {
+            *self.keys.lock().unwrap() = Some(session);
+        }
+        Ok(token)
     }
 
-    /// Sign the device's challenge with `keys` and exchange it for a scoped token.
-    async fn authorize_with_keys(
-        &self,
-        keys: &DerivedKeys,
-        challenge: &Challenge,
-        scope: &Scope,
-        exp_seconds: u32,
-        ctx: Option<&str>,
-    ) -> Result<String> {
-        let payload = EjwtPayload::new(challenge, keys, scope, exp_seconds, ctx, now_unix());
-        let ejwt = build_ejwt(keys, &challenge.spk, &payload)?;
+    /// Exchange a signed `auth` JWT for a scoped token and cache it.
+    async fn exchange_ejwt(&self, ejwt: &str, scope: &Scope, ctx: Option<&str>) -> Result<String> {
         let resp = self.req(Method::POST, "/api/auth/token", Some(&json!({ "auth": ejwt })), None).await?;
         let token = resp
             .get("token")
@@ -389,6 +413,21 @@ mod tests {
     fn truthy_as_js() {
         assert!(!truthy(&Value::Null) && !truthy(&json!(false)) && !truthy(&json!("")) && !truthy(&json!(0)));
         assert!(truthy(&json!(true)) && truthy(&json!("x")) && truthy(&json!(1)) && truthy(&json!({})));
+    }
+
+    // DEV-532: refused before anything is sent (nothing listens on port 9).
+    #[tokio::test]
+    async fn plain_http_password_login_refused() {
+        let hem = Hem::new("http://127.0.0.1:9", HemOptions::default()).unwrap();
+        let e = hem.authorize_password(Some("pw"), "keymgmt:list", AuthOptions::default()).await.unwrap_err();
+        assert_eq!(e.code, "plain_http_login");
+        let e = hem.authorize_password(None, "keymgmt:list", AuthOptions::default()).await.unwrap_err();
+        assert_eq!(e.code, "plain_http_login");
+        // Allowed: it gets as far as the network (no device there).
+        let opts = HemOptions { allow_plain_http_login: true, ..Default::default() };
+        let hem = Hem::new("http://127.0.0.1:9", opts).unwrap();
+        let e = hem.authorize_password(None, "keymgmt:list", AuthOptions::default()).await.unwrap_err();
+        assert_ne!(e.code, "plain_http_login");
     }
 
     #[tokio::test]

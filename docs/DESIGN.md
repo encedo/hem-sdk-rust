@@ -42,6 +42,15 @@ answers.
 7. **Secrets:** a password is held as `Zeroizing<String>` only for the key
    derivation; the derived X25519 secret is zeroized on drop; PBKDF2 (600 000
    iterations) runs on `spawn_blocking`, off the async runtime.
+8. **A remembered password is the per-boot `K_s`** (DEV-532), never the derived
+   key: `K_s = X25519(user_sk, spk)` is the HMAC key of every `auth` JWT of one
+   device boot; `user_sk` is dropped as soon as `K_s` is computed. The entry is
+   bound to `eid` + `spk` and to `HemOptions::key_cache_ttl`; another boot,
+   another device or the end of the TTL forgets it (`auth_password_required`).
+   It is kept only after the device accepted the login. Password login over
+   plain `http://` is refused (`plain_http_login`) unless
+   `HemOptions::allow_plain_http_login`: there `iss` and the HMAC let an
+   observer test password guesses offline. The wire is unchanged.
 
 ## Technical choices
 

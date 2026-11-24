@@ -8,6 +8,12 @@
 //!    X25519 key pair from the seed (`iss` = public key, standard base64)
 //! 3. eJWT = b64url(header) . b64url(payload) . b64url(HMAC-SHA256(input, X25519(seed, spk)))
 //! 4. `POST /api/auth/token { auth: eJWT }` -> `{ token }`
+//!
+//! A remembered password is `K_s = X25519(seed, spk)` (DEV-532, [`SessionKey`]),
+//! not the seed: it signs every `auth` JWT of this device boot and dies with
+//! the next one (new `spk`).
+
+use std::time::{Duration, Instant};
 
 use base64::alphabet;
 use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD, URL_SAFE_NO_PAD};
@@ -126,6 +132,59 @@ impl DerivedKeys {
     }
 }
 
+/// DEV-532: what a remembered password leaves behind - the per-boot secret
+/// `K_s = X25519(user_sk, spk)`, the HMAC key of every `auth` JWT of this
+/// device boot. It dies with the device's next boot (new `spk`) and does not
+/// give `user_sk`.
+pub(crate) struct SessionKey {
+    eid: String,
+    spk: String,
+    iss: String, // user_pk, standard base64 (the `iss` claim)
+    k_s: Zeroizing<[u8; 32]>,
+    until: Option<Instant>, // HemOptions::key_cache_ttl
+}
+
+impl SessionKey {
+    /// `K_s` for this challenge. The caller drops `keys` right after.
+    pub(crate) fn new(keys: &DerivedKeys, ch: &Challenge, ttl: Option<Duration>) -> Result<Self> {
+        let shared = keys.secret.diffie_hellman(&PublicKey::from(spk_bytes(&ch.spk)?)); // zeroized on drop
+        Ok(Self {
+            eid: ch.eid.clone(),
+            spk: ch.spk.clone(),
+            iss: keys.pubkey_b64.clone(),
+            k_s: Zeroizing::new(*shared.as_bytes()),
+            until: ttl.map(|t| Instant::now() + t),
+        })
+    }
+
+    /// Usable for this challenge: the same device boot (`eid`, `spk`), within the TTL.
+    pub(crate) fn fits(&self, ch: &Challenge) -> bool {
+        self.eid == ch.eid && self.spk == ch.spk && self.until.map_or(true, |u| Instant::now() < u)
+    }
+
+    /// The signed `auth` JWT for this challenge.
+    pub(crate) fn ejwt(
+        &self,
+        ch: &Challenge,
+        scope: &Scope,
+        exp_seconds: u32,
+        ctx: Option<&str>,
+        now: i64,
+    ) -> Result<String> {
+        build_ejwt(&self.k_s, &EjwtPayload::new(ch, &self.iss, scope, exp_seconds, ctx, now))
+    }
+
+    pub(crate) fn iss(&self) -> &str {
+        &self.iss
+    }
+}
+
+fn spk_bytes(spk_b64: &str) -> Result<[u8; 32]> {
+    from_b64(spk_b64)?
+        .try_into()
+        .map_err(|_| HemError::new("bad_response", "device key (spk) is not 32 bytes"))
+}
+
 /// PBKDF2-SHA256(password, eid, 600 000) -> X25519 key pair.
 /// Slow on purpose (~0.3 s optimised); call it off the async runtime.
 pub(crate) fn derive_x25519(password: &str, eid: &str) -> DerivedKeys {
@@ -151,7 +210,7 @@ impl<'a> EjwtPayload<'a> {
     /// `iat` is now - 5 s (clock drift), `exp` = `iat` + `exp_seconds`.
     pub(crate) fn new(
         challenge: &'a Challenge,
-        keys: &'a DerivedKeys,
+        iss: &'a str,
         scope: &'a Scope,
         exp_seconds: u32,
         ctx: Option<&'a str>,
@@ -163,23 +222,19 @@ impl<'a> EjwtPayload<'a> {
             aud: &challenge.spk,
             exp: iat + i64::from(exp_seconds),
             iat,
-            iss: &keys.pubkey_b64,
+            iss,
             scope,
             ctx,
         }
     }
 }
 
-pub(crate) fn build_ejwt(keys: &DerivedKeys, spk_b64: &str, payload: &EjwtPayload<'_>) -> Result<String> {
+/// The eJWT signed with `K_s` (DEV-532: the key, not the seed and `spk`).
+pub(crate) fn build_ejwt(k_s: &[u8; 32], payload: &EjwtPayload<'_>) -> Result<String> {
     let body = serde_json::to_vec(payload).map_err(|e| HemError::invalid_arg(e.to_string()))?;
     let input = format!("{}.{}", URL_SAFE_NO_PAD.encode(EJWT_HEADER), URL_SAFE_NO_PAD.encode(body));
 
-    let spk: [u8; 32] = from_b64(spk_b64)?
-        .try_into()
-        .map_err(|_| HemError::new("bad_response", "device key (spk) is not 32 bytes"))?;
-    let shared = keys.secret.diffie_hellman(&PublicKey::from(spk));
-
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(shared.as_bytes())
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(k_s)
         .map_err(|_| HemError::new("auth_failed", "HMAC key"))?;
     mac.update(input.as_bytes());
     Ok(format!("{input}.{}", URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes())))
@@ -284,5 +339,35 @@ mod tests {
         assert!(c.find(&Scope::from("b"), Some("x"), 1000).is_none());
         assert!(c.find(&Scope::from("c"), None, 1000).is_none());
         assert!(c.find(&Scope::from("a"), None, 2000).is_none()); // expired
+    }
+
+    fn challenge(spk_byte: u8) -> Challenge {
+        Challenge { eid: to_b64(&[7u8; 32]), spk: to_b64(&[spk_byte; 32]), jti: to_b64(&[1u8; 32]) }
+    }
+
+    // DEV-532: a remembered password fits only the device boot it came from.
+    #[test]
+    fn session_key_fits_one_boot() {
+        let keys = DerivedKeys::from_seed([5u8; 32]);
+        let ch = challenge(9);
+        let s = SessionKey::new(&keys, &ch, None).unwrap();
+        assert!(s.fits(&ch));
+        assert!(s.fits(&Challenge { jti: to_b64(&[2u8; 32]), ..ch.clone() })); // a new nonce, same boot
+        assert!(!s.fits(&challenge(10))); // new spk: the device rebooted
+        assert!(!s.fits(&Challenge { eid: to_b64(&[8u8; 32]), ..ch.clone() })); // another device
+        let expired = SessionKey::new(&keys, &ch, Some(Duration::ZERO)).unwrap();
+        assert!(!expired.fits(&ch));
+    }
+
+    // DEV-532: K_s is X25519(user_sk, spk) - the same key the device computes
+    // as X25519(spk_sk, iss).
+    #[test]
+    fn session_key_is_the_device_shared_secret() {
+        let user = DerivedKeys::from_seed([5u8; 32]);
+        let spk_sk = StaticSecret::from([9u8; 32]);
+        let ch = Challenge { spk: to_b64(PublicKey::from(&spk_sk).as_bytes()), ..challenge(0) };
+        let s = SessionKey::new(&user, &ch, None).unwrap();
+        let iss: [u8; 32] = from_b64(s.iss()).unwrap().try_into().unwrap();
+        assert_eq!(*s.k_s, *spk_sk.diffie_hellman(&PublicKey::from(iss)).as_bytes());
     }
 }
